@@ -1,5 +1,7 @@
 # Spike2_Burst_Analysis
 Get bursts from .abf (pClamp) files using Spike2 scripts. Do further analysis in Matlab
+Some of the scripts were written by Dirk Bucher. Other relevant Spike2 scripts can be found at his website:
+http://stg.rutgers.edu/Resources.html
 
 Here is the work throughput for these scripts:
 
