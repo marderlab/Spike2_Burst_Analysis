@@ -1,0 +1,532 @@
+'big script for analyzing STG files 
+'
+'heavily insipired by / borrowed from dirk bucher's pylPhConsec.s2s 
+'
+
+
+'declare global variables
+var UnitsDo%[3];                            'these flag which units are being analyzed
+var Thresholds[4][2];                       'holds low and hi cutoffs for spike detection for each channel
+var Channels%[4];                           'remembers the channel number for each unit 
+var fname$, fnumb$, fnum%, nfiles%, fnames$[2000], windname$, exname$;     'variables for interaction with files
+var fcount%, ffirst%, counter%;                                 '
+var nchans%,chlist%[30];                     'for channel searches
+var offsetT;                                 'time added to start for next file
+var PDLPPY%, PDLPPY$[3], memPDLPPY%[3], mode%; 'for looped ananlysis of pyloric units
+var PDsubs$:="Don'tSubtract", LPsubs$:="Don'tSubtract", PYsubs$:="Don'tSubtract", jitter[3],delmode%[3];
+var BurstChannels%[3], BurstMax[3], BurstNum%[3];
+var vh%, cheapvar%, automator%;
+var ok%, ok1%, okcursor%, okevents%, oksubs%, okbursts%;   'cursor variables
+var outfile%[3], unitcounter%;
+
+'some default value assignments
+PDLPPY$[0]:="PD";
+PDLPPY$[1]:="LP";
+PDLPPY$[2]:="PY";
+BurstMax[0]:=0.1;
+BurstMax[1]:=0.1;
+BurstMax[2]:=0.1;
+BurstNum%[0]:=3;
+BurstNum%[1]:=3;
+BurstNum%[2]:=3;
+jitter[0]:=0.1;
+jitter[1]:=0.1;
+jitter[2]:=0.1;
+
+'procedure to delete events in one channel from another channel
+' so performs a subtraction.  channel1% and channel2% point to event channels 
+' and duplicate spikes are subtracted FROM channel1%, if they are within
+' time jitter.
+proc DeleteEvents (channel1%, channel2%, jitter, delmode%)    'Procedure to delete spikes in event channel2 from event channel1
+var DupSpikeTimes[100000], DupCounter%, DupCount%;
+var checkchans%[30], checkchancount%, checkchancounter%;
+var problemflag%:=0;
+
+'this is to make sure there are no bugs because of non event channels sent to the procedure
+checkchancount%:=ChanList(checkchans%[],2);
+
+for checkchancounter%:=0 to checkchancount%-1 step 1 do 'check for event channels
+    if checkchans%[checkchancounter%]=channel1% or checkchans%[checkchancounter%]=channel2% then    'flag as found event channel
+        problemflag%:=problemflag%+1;
+    endif
+next
+if problemflag%=2 or cheapvar%=1 then    'files have passed error checks, have two event channels
+    DupCount%:=ChanData(channel2%, DupSpikeTimes[], 0, MaxTime());    'gets spike times from channel2
+    for DupCounter%:=0 to DupCount%-1 step 1 do 'stop at each event in channel 2 
+        MemDeleteTime(channel1%, delmode%, DupSpikeTimes[DupCounter%], jitter); 'spike2 function performs deletion
+    next;
+endif
+end
+
+offsetT:=0;
+
+' start dialog chooses first file
+DlgCreate("Select the first file");
+DlgText("Then choose .smr file to start with",0,4);
+DlgText("from the files on your computer...",0,5);
+DlgReal(1,"First set start time for first file(in s): ",0,1750000);
+DlgString(2,"Experiment Name?",16);
+DlgButton(0,"Get me out of here");
+DlgButton(1, "I'm ready!");
+ok%:=DlgShow(offsetT, exname$);
+
+if ok%=0 then   'exit script
+    halt;
+endif
+
+'fills an array with .smr filenames in the directory .
+ok%:=FileOpen("",0);
+fname$:=FileName$(3);
+fnumb$:=FileName$(4);
+fname$:=fname$+fnumb$+".smr";
+nfiles%:=FileList(fnames$[], 0);
+
+'... then checks until finds the selected one
+ffirst%:=-1;
+repeat ffirst%:=ffirst%+1;
+until fnames$[ffirst%]=fname$;
+
+FileClose();
+
+'Set up save files
+
+for unitcounter%:=0 to 2 step 1 do
+    outfile%[unitcounter%]:=FileOpen(exname$ + "_" + PDLPPY$[unitcounter%] + "_bursts.txt",1);
+
+    PrintLog(outfile%);
+
+    if outfile%[unitcounter%]<0 then
+        outfile%[unitcounter%]:=FileNew(1);
+        'Print(PDLPPY$[unitcounter%]+"burstfile,start,end,realstart,realend,period,frequency,dutycycle,spikes/burst,freqinburst,burstintervalparam,burstnumparam");
+        FileSaveAs(exname$+"_"+PDLPPY$[unitcounter%]+"_bursts.txt",1);
+    endif
+    
+    FileClose();
+
+next;
+
+FrontView(App (3));
+
+
+'big loop for each file
+for fcount%:=ffirst% to nfiles%-1 step 1 do
+
+    ' First get basic information about current file    
+    fname$:=fnames$[fcount%];           
+    ok%:=FileOpen(fname$,0,1);
+    fnumb$:=FileName$(4);
+    windname$:=FileName$(3);
+    if exname$<>"" then windname$:=exname$; endif
+    fnum%:=val(fnumb$);
+    XRange(MaxTime()/2,MaxTime()/2+MaxTime()/4);    'range from midpoint to 3/4 of file, Dirk's 
+    Optimise(-1);                                   'optimize y range for all channelsd
+    
+    WindowVisible(3);   'show it
+       
+    'dialog selects which units are to be analyzed
+    ' can be changed from one file to the next, but remembers 
+    ' previous settings
+    repeat ' returns here if "repeat file" selected after burst detection (okbursts%)
+    if automator%=0 then    'choose units manually
+        DlgCreate("Choose Units");
+        DlgText("Set to 1 to analyze",0,5);
+        DlgInteger(1, "Get PD?",0,1,0,0,"0|1"); 'these define the spinning input boxes
+        DlgInteger(2, "Get LP?",0,1,0,0,"0|1");
+        DlgInteger(3, "Get PY?",0,1,0,0,"0|1");
+        DlgButton(0, "Skip File");
+        DlgButton(1, "Go!");
+        DlgButton(2, "Exit Script");
+        ok%:=DlgShow(UnitsDo%[0], UnitsDo%[1], UnitsDo%[2]);   'these variables take the inputs
+        
+        if ok%=2 then   'exit script
+            FrontView (App (3));
+            halt;
+        endif
+    else        
+        ok%:=1;
+    endif
+    
+        
+    if ok%=1 then       'analyze file
+        repeat    ' returns here to restart file after spike detection
+            Fontset("arial",14,2);
+            XRange(MaxTime()/2,MaxTime()/2+MaxTime()/60);
+            Optimise(-1);
+            
+            'for loop here goes through PD, LP, and PY
+            for PDLPPY%:=0 to 2 step 1 do
+                if UnitsDo%[PDLPPY%]=1 then     'only do if unit is marked to do
+
+                'define string form for channels names, etc
+
+                
+                ChanList(chlist%[],2049);
+                HCursorDelete(-1);
+                
+                'finds the relevant channel if known, or sets them in first waveform channel by default
+                if Channels%[PDLPPY%]=0 then
+                    HCursorNew(chlist%[1]);
+                    HCursorNew(chlist%[1]);
+                else
+                    HCursorNew(Channels%[PDLPPY%]);
+                    HCursorNew(Channels%[PDLPPY%]);
+                endif
+                
+                repeat  'for okevents%, repeat point for threshold set retry
+                    'first set cursors appropriately
+                    HCursor(1,Thresholds[PDLPPY%][0]);
+                    HCursor(2,Thresholds[PDLPPY%][1]);
+                    HCursorLabel(4,1,PDLPPY$[PDLPPY%]+" Threshold");
+                    HCursorLabel(4,2,PDLPPY$[PDLPPY%]+" Large Spike Cutoff");
+                            
+                    if automator%=0 then
+                    okcursor%:=Interact("Place "+PDLPPY$[PDLPPY%]+" Cursors", 504, 0, "     OK      ","Stop Script","Skip "+PDLPPY$[PDLPPY%]);
+                    else
+                        okcursor%:=1;
+                    endif
+                            
+                    docase
+                    case okcursor%=2 then       'stop script chosen, so we stop the script
+                        FrontView(App(3));
+                        halt
+                    case okcursor%=3 then       'skip unit
+                        Channels%[PDLPPY%]:=0;          'changes reflect settings for next file
+                        Thresholds[PDLPPY%][0]:=0;
+                        Thresholds[PDLPPY%][1]:=0;
+                        UnitsDo%[PDLPPY%]:=0;
+                        okevents%:=1;           'to get out of repeat loop checking for OK on current file
+                    case okcursor%=1 then       'get the spikes
+                        'set the thresholds to cursor values
+                        Channels%[PDLPPY%]:=HCursorChan(1);
+                        Thresholds[PDLPPY%][0]:=HCursor(1);
+                        Thresholds[PDLPPY%][1]:=HCursor(2);
+                        memPDLPPY%[PDLPPY%]:=MemChan(2); 'Creates new event channel to hold PD spikes
+                        
+                        'rising or falling?
+                        if Thresholds[PDLPPY%][0]<0 then 
+                            mode%:=3;
+                        else
+                            mode%:=2;
+                        endif
+                        
+                                'gets the events above the low threshold
+                        MemImport(memPDLPPY%[PDLPPY%], Channels%[PDLPPY%], 0, MaxTime(), mode%, 0.001, Thresholds[PDLPPY%][0]);
+                        
+                        var LargeMemChan%;
+                        
+                        LargeMemChan%:=MemChan(2);
+                        
+                        'gets events above the high cutoff threshold
+                        MemImport(LargeMemChan%, Channels%[PDLPPY%], 0, MaxTime(), mode%, 0.001, Thresholds[PDLPPY%][1]);
+                    
+                        'subtract the high events from the low events
+                        cheapvar%:=1;
+                        DeleteEvents(memPDLPPY%[PDLPPY%], LargeMemChan%, 0.004,0);
+                        cheapvar%:=0;
+                        
+                        'show the events for user check
+                        ChanShow(memPDLPPY%[PDLPPY%]);
+                        ChanTitle$(memPDLPPY%[PDLPPY%], PDLPPY$[PDLPPY%]+"spikes");
+                        DrawMode(memPDLPPY%[PDLPPY%], 2);
+                        ChanOrder(Channels%[PDLPPY%],-1, memPDLPPY%[PDLPPY%]); 
+                            
+                        'and ask
+                        if automator%=0 then        
+                            okevents%:=Interact("Spikes good? (Subtraction is later)", 504, 0, "Good!", "No. Try again.");
+                            if okevents%=2 then
+                                ChanDelete(memPDLPPY%[PDLPPY%]);
+                            endif
+                        else
+                            okevents%:=1;
+                        endif
+
+                    endcase
+                
+                until okevents%=1;
+                endif   'UnitsDo check
+                
+            next;   'PDLPPY%
+            
+            ' Now Subtractions
+                
+            if UnitsDo%[0]=1 or UnitsDo%[1]=1 or UnitsDo%[2]=1 then
+                    
+            repeat  'continues until subtractions are done
+                    
+            if automator%=0 then
+                            
+                'define the dialog
+                DlgCreate("Spike Subtractions");
+                DlgString(1, "PD Spikes - ",12, "", 0, 0, "Don'tSubtract|SubtractPY|SubtractLP|SubtractBoth");
+                DlgReal(2, "PD subtraction jitter - ",0,1); 
+                DlgInteger(3, "PD - one spike only? (0 for yes, 1 to clear all within jitter) - ", 0, 1, 0, 0, "0|1");
+                DlgString(4, "LP Spikes - ",12, "", 0, 0, "Don'tSubtract|SubtractPD|SubtractPY|SubtractBoth");
+                DlgReal(5, "LP subtraction jitter - ",0,1);
+                DlgInteger(6, "LP - one spike only? (0 for yes, 1 to clear all within jitter) - ", 0, 1, 0, 0, "0|1");
+                DlgString(7, "PY Spikes - ",12, "", 0, 0, "Don'tSubtract|SubtractPD|SubtractLP|SubtractBoth");
+                DlgReal(8,"PY subtraction jitter - ",0,1);
+                DlgInteger(9, "PY - one spike only? (0 for yes, 1 to clear all within jitter) - ", 0, 1, 0, 0, "0|1");
+                DlgButton(0,"Done. Ready for Bursts.");
+                DlgButton(1,"Do Subtractions!");
+                DlgButton(2,"Start File Over.");
+                oksubs%:=DlgShow(PDsubs$, jitter[0], delmode%[0], LPsubs$, jitter[1], delmode%[1], PYsubs$, jitter[2], delmode%[2]); 'Get the string inputs
+                'Note these strings are unchanged from file to file
+                'so next file comes pre populated with values from previous file
+            else
+                oksubs%:=1;
+            endif
+                    
+            
+            'do relevant subtractions, if possible    
+            if oksubs%=1 then
+                docase
+                case PDsubs$="SubtractLP" then
+                    DeleteEvents(memPDLPPY%[0],memPDLPPY%[1],jitter[0],delmode%[0]);
+                case PDsubs$="SubtractPY" then
+                    DeleteEvents(memPDLPPY%[0],memPDLPPY%[2],jitter[0],delmode%[0]);
+                case PDsubs$="SubtractBoth" then
+                    DeleteEvents(memPDLPPY%[0],memPDLPPY%[1],jitter[0],delmode%[0]);
+                    DeleteEvents(memPDLPPY%[0],memPDLPPY%[2],jitter[0],delmode%[0]);
+                endcase
+                
+                docase                        
+                case LPsubs$="SubtractPD" then
+                    DeleteEvents(memPDLPPY%[1],memPDLPPY%[0],jitter[1],delmode%[1]);
+                case LPsubs$="SubtractPY"then
+                    DeleteEvents(memPDLPPY%[1],memPDLPPY%[2],jitter[1],delmode%[1]);
+                case LPsubs$="SubtractBoth" then
+                    DeleteEvents(memPDLPPY%[1],memPDLPPY%[0],jitter[1],delmode%[1]);
+                    DeleteEvents(memPDLPPY%[1],memPDLPPY%[2],jitter[1],delmode%[1]);
+                endcase
+                    
+                docase              
+                case PYsubs$="SubtractPD" then
+                    DeleteEvents(memPDLPPY%[2],memPDLPPY%[0],jitter[2],delmode%[2]);
+                case PYsubs$="SubtractLP" then
+                    DeleteEvents(memPDLPPY%[2],memPDLPPY%[1],jitter[2],delmode%[2]); 
+                case PYsubs$="SubtractBoth" then
+                    DeleteEvents(memPDLPPY%[2],memPDLPPY%[0],jitter[2],delmode%[2]);
+                    DeleteEvents(memPDLPPY%[2],memPDLPPY%[1],jitter[2],delmode%[2]);             
+                endcase
+            endif   'if oksubs%=1
+                    
+            if automator%=1 then oksubs%:=0; endif
+                            
+            until oksubs%<>1;  'no more subtractions to do
+        else oksubs%:=0;
+        endif
+                    
+    
+        if oksubs%=2 then   'start file over, delete channels 
+            if UnitsDo%[0]=1 then ChanDelete(memPDLPPY%[0]); endif
+            if UnitsDo%[1]=1 then ChanDelete(memPDLPPY%[1]); endif
+            if UnitsDo%[2]=1 then ChanDelete(memPDLPPY%[2]); endif
+        endif
+            
+        until oksubs%<>2;   'repeat file if user wanted
+        
+        'onward to burst detection
+        '
+        'create initial bursts based on default settings:
+        for counter%:=0 to 2 step 1 do  'check all three units
+            if UnitsDo%[counter%]=1 then    'if we are doing this unit, do it
+                BurstChannels%[counter%]:=MemChan(5);
+                BurstMake(BurstChannels%[counter%], memPDLPPY%[counter%], 0, MaxTime(), BurstMax[counter%], BurstMax[counter%], Burstnum%[counter%]);
+                ChanShow(BurstChannels%[counter%]);
+                ChanTitle$(BurstChannels%[counter%],PDLPPY$[counter%]+" Bursts");
+                ChanOrder(memPDLPPY%[counter%], -1, BurstChannels%[counter%]);
+            endif
+        next
+        
+        repeat 'for okbursts%
+                HCursorDelete(-1);
+                var onlyfourcursors%;       'yea... dumb!
+                onlyfourcursors%:=0;
+                for counter%:=0 to 2 step 1 do
+                    if UnitsDo%[counter%]=1 then
+                        if onlyfourcursors%<4 then
+                            onlyfourcursors%:=onlyfourcursors%+1;
+                            HCursorNew(Channels%[counter%],Thresholds[counter%][0]);
+                            HCursorLabel(4,onlyfourcursors%,PDLPPY$[counter%]+" Threshold");
+                        else
+                            HCursorDelete(4);
+                            HCursorNew(Channels%[counter%],Thresholds[counter%][0]);
+                            HCursorLabel(4,4,PDLPPY$[counter%]+" Threshold");
+                        endif
+                        if onlyfourcursors%<4 then
+                            onlyfourcursors%:=onlyfourcursors%+1;
+                            HCursorNew(Channels%[counter%],Thresholds[counter%][1]);
+                            HCursorLabel(4, onlyfourcursors%,PDLPPY$[counter%]+" Large Spike Cutoff");
+                        endif   
+                    endif
+                next
+                
+                if automator%=1 then
+                    XRange(MaxTime()/3, 2*MaxTime()/3);
+                endif
+                
+                okbursts%:=Interact("How do you want to proceed?", 504, 0, "Log Data", "Revise Bursts", "Stop Script", "Restart File","Add/Subtract Time","Skip File");
+                 
+                docase 
+                case okbursts%=5 then
+                    var okaddtime%, timeamount%;
+                    timeamount%:=0;
+                    DlgCreate("Add or Subtract Time");
+                    DlgText("Current Overall Experiment Time, Start of This File = "+Str$(offsetT)+" s .",0,1);
+                    DlgInteger(1,"Insert how many seconds into experiment overall time? (can be negative) ",-500000,500000,0,2);
+                    okaddtime%:=DlgShow(timeamount%);
+                    if okaddtime%=1 then offsetT:=offsetT+timeamount%; endif
+                    
+                 
+                case okbursts%=3 then 'stop script
+                    PrintLog(offsetT+MaxTime());
+                    HCursorDelete(-1);
+                    FileClose(0,-1);
+                    FrontView(App(3));                
+                    halt
+                case okbursts%=2 then ' revise bursts
+                    var okburstpams%;
+                    DlgCreate("Burst Parameters");
+                    DlgText("PD burst parameters:",0,1);
+                    DlgReal(1,"Max Spike Interval",0,100,0,2);
+                    DlgInteger(2,"Min Spike Number",2,100,0,3);
+                    DlgText("LP burst parameters:",0,5);
+                    DlgReal(3,"Max Spike Interval",0,100,0,6);
+                    DlgInteger(4,"Min Spike Number",2,100,0,7);
+                    DlgText("PY burst parameters:",0,9);
+                    DlgReal(5,"Max Spike Interval",0,100,0,10);
+                    DlgInteger(6,"Min Spike Number",2,100,0,11);
+                    okburstpams%:=DlgShow(BurstMax[0],BurstNum%[0],BurstMax[1],BurstNum%[1],BurstMax[2],BurstNum%[2]);
+                    
+                if okburstpams%=1 then
+                    for counter%:=0 to 2 step 1 do
+                        if UnitsDo%[counter%]=1 then
+                            MemDeleteTime(BurstChannels%[counter%],3,0,MaxTime());
+                            BurstMake(BurstChannels%[counter%],memPDLPPY%[counter%],0,MaxTime(),BurstMax[counter%],BurstMax[counter%],BurstNum%[counter%]);
+                        endif
+                    next
+                endif
+            case okbursts%=1 then 'put it down in log
+
+                'putting burst start and end times into separate arrays
+
+                var burststart[3][100000],burstend[3][100000];		
+                var nburststart%[3],nburstend%[3];
+                var recordflag%:=0;
+        
+                    'for pd burstchannel:
+                    
+                    for unitcounter%:=0 to 2 step 1 do
+                if UnitsDo%[unitcounter%]=1 then
+                    recordflag%:=1;
+                    MarkMask(BurstChannels%[unitcounter%],-1,1,-1);  'reset = include all codes+
+                    MarkMask(BurstChannels%[unitcounter%],0,-1,-1);		'set all codes off
+                    MarkMask(BurstChannels%[unitcounter%],0,1,0);	'turn on code 0 = burst start only; 1=end code only
+    
+                    nburststart%[unitcounter%]:=ChanData(BurstChannels%[unitcounter%],burststart[unitcounter%][],0,MaxTime());	'get levator burst start times
+    
+                    MarkMask(BurstChannels%[unitcounter%],-1,1,-1);  'reset = include all codes
+                    MarkMask(BurstChannels%[unitcounter%],0,-1,-1);		'set all codes off
+                    MarkMask(BurstChannels%[unitcounter%],0,1,1);	'turn on code 0 = burst start only; 1=end code only
+    
+                    nburstend%[unitcounter%]:=ChanData(BurstChannels%[unitcounter%],burstend[unitcounter%][],burststart[unitcounter%][0],MaxTime());	'get levator burst end times
+                        MarkMask(BurstChannels%[unitcounter%],-1,1,-1);  'reset = include all codes
+                        
+                            'now output!
+                            
+                            var burstcounter%, period, frequency, dutycycle, nspikes%[100000], burstfrequency, dummy[100000], start, finish, params$;
+                            params$:=Str$(BurstMax[unitcounter%])+","+Str$(BurstNum%[unitcounter%]);
+
+                            var b%;
+                            for b%:=0 to nburststart%[unitcounter%]-1 step 1 do
+                                
+                                nspikes%[b%]:=ChanData(memPDLPPY%[unitcounter%],dummy[],burststart[unitcounter%][b%],burstend[unitcounter%][b%]);
+                            next ;  'b%;
+                            
+                            
+                            outfile%[unitcounter%]:=FileOpen(exname$ + "_" + PDLPPY$[unitcounter%] + "_bursts.txt",1);
+
+                            for b%:=nburststart%[unitcounter%]-1 to 0 step -1 do
+                                burstfrequency:=(nspikes%[b%]-1)/(burstend[unitcounter%][b%]-burststart[unitcounter%][b%]);
+                                start:=burststart[unitcounter%][b%];
+                                finish:=burstend[unitcounter%][b%];
+     
+                            
+                                if b%<nburststart%[unitcounter%]-1 then
+                                    period:=burststart[unitcounter%][b%+1]-burststart[unitcounter%][b%];
+                                    frequency:=1/period;
+                                    dutycycle:=(burstend[unitcounter%][b%]-burststart[unitcounter%][b%])/period;
+                                    Print("%s,%f,%f,%f,%f,%f,%f,%f,%d,%f,%s\n",exname$+fnumb$,start,finish,start+offsetT,finish+offsetT,period,frequency,dutycycle,nspikes%[b%],burstfrequency,params$);
+                                else
+                                    Print("%s,%f,%f,%f,%f,%s,%d,%f,%s\n",exname$+fnumb$,start,finish,start+offsetT,finish+offsetT,",,",nspikes%[b%],burstfrequency,params$);
+                                endif
+                                
+                              next; 'b%
+                                
+                            FileSave();
+                            FileClose();
+                                                             
+                        endif
+                  next;
+                          
+                    docase
+                                  
+                    case UnitsDo%[0]=1 and UnitsDo%[1]=1 and UnitsDo%[2]=1 then
+                        ExportChanList();            
+                        ExportChanList(0,MaxTime(), memPDLPPY%[0], memPDLPPY%[1], memPDLPPY%[2]);
+                        FileSaveAs("spikes_"+windname$+fnumb$+".smr",0);
+                    case UnitsDo%[0]=1 and UnitsDo%[1]=1 and UnitsDo%[2]=0 then
+                        ExportChanList();
+                        ExportChanList(0,MaxTime(),memPDLPPY%[0], memPDLPPY%[1]);
+                        FileSaveAs("spikes_"+windname$+fnumb$+".smr",0);
+                    case UnitsDo%[0]=1 and UnitsDo%[1]=0 and UnitsDo%[2]=1 then
+                        ExportChanList();
+                        ExportChanList(0,MaxTime(),memPDLPPY%[0],memPDLPPY%[2]);
+                        FileSaveAs("spikes_"+windname$+fnumb$+".smr",0);
+                    case UnitsDo%[0]=0 and UnitsDo%[1]=1 and UnitsDo%[2]=1 then
+                        ExportChanList();
+                        ExportChanList(0,MaxTime(),memPDLPPY%[1],memPDLPPY%[2]);
+                        FileSaveAs("spikes_"+windname$+fnumb$+".smr",0);
+                    case UnitsDo%[0]=1 and UnitsDo%[1]=0 and UnitsDo%[2]=0 then
+                        ExportChanList();
+                        ExportChanList(0,MaxTime(),memPDLPPY%[0]);
+                        FileSaveAs("spikes_"+windname$+fnumb$+".smr",0);
+                    case UnitsDo%[0]=0 and UnitsDo%[1]=1 and UnitsDo%[2]=0 then
+                        ExportChanList();
+                        ExportChanList(0,MaxTime(),memPDLPPY%[1]);
+                        FileSaveAs("spikes_"+windname$+fnumb$+".smr",0);
+                    case UnitsDo%[0]=0 and UnitsDo%[1]=0 and UnitsDo%[2]=1 then
+                        ExportChanList();
+                        ExportChanList(0,MaxTime(),memPDLPPY%[2]);
+                        FileSaveAs("spikes_"+windname$+fnumb$+".smr",0);  
+                    endcase
+                    
+                    automator%:=1;
+                        
+                 
+            case okbursts%=4 then
+                automator%:=0;
+                if UnitsDo%[0]=1 then 
+                    ChanDelete(memPDLPPY%[0]);
+                    ChanDelete(BurstChannels%[0]);
+                endif
+                if UnitsDo%[1]=1 then 
+                    ChanDelete(memPDLPPY%[1]);
+                    ChanDelete(BurstChannels%[1]);
+                endif
+                if UnitsDo%[2]=1 then 
+                    ChanDelete(memPDLPPY%[2]);
+                    ChanDelete(BurstChannels%[2]);
+                endif
+            endcase
+        until okbursts%<>2 and okbursts%<>5; 'move to next file unless changed parameters, then check bursts again
+        
+        endif   'if ok%=1 master for Go! to original choice after file opens to analyze file
+        
+    until okbursts%<>4;
+    
+
+    offsetT:=offsetT+MaxTime();   'update experiment overall time
+    FileClose(0,-1);
+
+next;   'fcount%
