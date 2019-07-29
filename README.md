@@ -58,5 +58,15 @@ Can subtract spikes from one channel which appear around another in Spike Subtra
 -To change spike interval or number pulled from click 'Revise Bursts
 -When completely satisfied click 'Log Data'
 
+After newsuperscript.s2s has run through all files bursts should be ready for analysis in Matlab
+-------------------------------------------------------------------------------------------------
 
+get_bursts.m - Can be used to pull information about all bursts by neuron
 
+spike2_to_mat.m - Used to separate bursts by file and collect several burst parameters. Uses get_bursts.m
+
+scatter_plotter.m - Plot relevant burst parameters by file (Used after spike2_to_mat.m)
+
+herrorbar.m - Used with T_phases.m below to plot phase error bars.
+
+T_phases.m - Used to plot phase plots. Will require reformatting based on number of files to plot for. Uses herrorbar.m
