@@ -5,9 +5,10 @@ Here is the work throughput for these scripts:
 
 Make folder of .abf files for analysis
 Make sure that .abf files are of type ABF1 (Integer). This is not the default for all versions of pClamp
--If this is not the case take the following steps below, otherwise skip the next section
----------------------------------------------------------------------------
+If this is not the case take the following steps below, otherwise skip the next section
+
 Convert .abf files to: type ABF1 (Integer)
+---------------------------------------------------------------------------
 Install:
 
 Digidata 1550/1550A and 1440A users:
